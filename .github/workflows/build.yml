@@ -1,7 +1,8 @@
 name: CI
 
 on:
-  workflow_dispatch: # allows manual triggering
+  # Allows manual triggering
+  workflow_dispatch:
     inputs:
       create_release:
         description: 'Create new release'
@@ -55,50 +56,8 @@ jobs:
         run: |
           mkdir build
           cd build
-          cmake ..
+          cmake -DBUILD_SHARED_LIBS=ON ..
           cmake --build . --config Release
-
-      - name: Test
-        id: cmake_test
-        run: |
-          cd build
-          ctest --verbose
-
-  ubuntu-latest-cmake-sanitizer:
-    runs-on: ubuntu-latest
-
-    continue-on-error: true
-
-    strategy:
-      matrix:
-        sanitizer: [ADDRESS, THREAD, UNDEFINED]
-        build_type: [Debug, Release]
-        accelerate: [ON, OFF]
-
-    steps:
-      - name: Clone
-        id: checkout
-        uses: actions/checkout@v1
-
-      - name: Dependencies
-        id: depends
-        run: |
-          sudo apt-get update
-          sudo apt-get install build-essential
-
-      - name: Build
-        id: cmake_build
-        run: |
-          mkdir build
-          cd build
-          cmake .. -DLLAMA_SANITIZE_${{ matrix.sanitizer }}=ON -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} -DLLAMA_ACCELERATE=${{ matrix.accelerate }}
-          cmake --build . --config ${{ matrix.build_type }}
-
-      - name: Test
-        id: cmake_test
-        run: |
-          cd build
-          ctest --verbose
 
   macOS-latest-make:
     runs-on: macos-latest
@@ -136,14 +95,8 @@ jobs:
         run: |
           mkdir build
           cd build
-          cmake -DLLAMA_AVX2=OFF ..
+          cmake -DBUILD_SHARED_LIBS=ON -DRWKV_AVX2=OFF ..
           cmake --build . --config Release
-
-      - name: Test
-        id: cmake_test
-        run: |
-          cd build
-          ctest --verbose
 
   windows-latest-cmake:
     runs-on: windows-latest
@@ -154,9 +107,9 @@ jobs:
          - build: 'avx2'
            defines: ''
          - build: 'avx'
-           defines: '-DLLAMA_AVX2=OFF'
+           defines: '-DRWKV_AVX2=OFF'
          - build: 'avx512'
-           defines: '-DLLAMA_AVX512=ON'
+           defines: '-DRWKV_AVX512=ON'
 
     steps:
       - name: Clone
@@ -168,7 +121,7 @@ jobs:
         run: |
           mkdir build
           cd build
-          cmake .. ${{ matrix.defines }}
+          cmake .. -DBUILD_SHARED_LIBS=ON ${{ matrix.defines }}
           cmake --build . --config Release
 
       - name: Check AVX512F support
@@ -186,7 +139,8 @@ jobs:
 
       - name: Test
         id: cmake_test
-        if: ${{ matrix.build != 'avx512' || env.HAS_AVX512F == '1' }} # Test AVX-512 only when possible
+        # Test AVX-512 only when possible
+        if: ${{ matrix.build != 'avx512' || env.HAS_AVX512F == '1' }}
         run: |
           cd build
           ctest -C Release --verbose
@@ -200,14 +154,14 @@ jobs:
         id: pack_artifacts
         if: ${{ ( github.event_name == 'push' && github.ref == 'refs/heads/master' ) || github.event.inputs.create_release == 'true' }}
         run: |
-          7z a llama-${{ env.BRANCH_NAME }}-${{ steps.commit.outputs.short }}-bin-win-${{ matrix.build }}-x64.zip .\build\bin\Release\*
+          7z a rwkv-${{ env.BRANCH_NAME }}-${{ steps.commit.outputs.short }}-bin-win-${{ matrix.build }}-x64.zip .\build\bin\Release\*
 
       - name: Upload artifacts
         if: ${{ ( github.event_name == 'push' && github.ref == 'refs/heads/master' ) || github.event.inputs.create_release == 'true' }}
         uses: actions/upload-artifact@v3
         with:
           path: |
-            llama-${{ env.BRANCH_NAME }}-${{ steps.commit.outputs.short }}-bin-win-${{ matrix.build }}-x64.zip
+            rwkv-${{ env.BRANCH_NAME }}-${{ steps.commit.outputs.short }}-bin-win-${{ matrix.build }}-x64.zip
 
   release:
     if: ${{ ( github.event_name == 'push' && github.ref == 'refs/heads/master' ) || github.event.inputs.create_release == 'true' }}
@@ -259,196 +213,3 @@ jobs:
                 });
               }
             }
-
-#  ubuntu-latest-gcc:
-#    runs-on: ubuntu-latest
-#
-#    strategy:
-#      matrix:
-#        build: [Debug, Release]
-#
-#    steps:
-#      - name: Clone
-#        uses: actions/checkout@v1
-#
-#      - name: Dependencies
-#        run: |
-#          sudo apt-get update
-#          sudo apt-get install build-essential
-#          sudo apt-get install cmake
-#
-#      - name: Configure
-#        run: cmake . -DCMAKE_BUILD_TYPE=${{ matrix.build }}
-#
-#      - name: Build
-#        run: |
-#          make
-#
-#  ubuntu-latest-clang:
-#    runs-on: ubuntu-latest
-#
-#    strategy:
-#      matrix:
-#        build: [Debug, Release]
-#
-#    steps:
-#      - name: Clone
-#        uses: actions/checkout@v1
-#
-#      - name: Dependencies
-#        run: |
-#          sudo apt-get update
-#          sudo apt-get install build-essential
-#          sudo apt-get install cmake
-#
-#      - name: Configure
-#        run: cmake . -DCMAKE_BUILD_TYPE=${{ matrix.build }} -DCMAKE_CXX_COMPILER=clang++ -DCMAKE_C_COMPILER=clang
-#
-#      - name: Build
-#        run: |
-#          make
-#
-#  ubuntu-latest-gcc-sanitized:
-#    runs-on: ubuntu-latest
-#
-#    strategy:
-#      matrix:
-#        sanitizer: [ADDRESS, THREAD, UNDEFINED]
-#
-#    steps:
-#      - name: Clone
-#        uses: actions/checkout@v1
-#
-#      - name: Dependencies
-#        run: |
-#          sudo apt-get update
-#          sudo apt-get install build-essential
-#          sudo apt-get install cmake
-#
-#      - name: Configure
-#        run: cmake . -DCMAKE_BUILD_TYPE=Debug -DLLAMA_SANITIZE_${{ matrix.sanitizer }}=ON
-#
-#      - name: Build
-#        run: |
-#          make
-#
-#  windows:
-#    runs-on: windows-latest
-#
-#    strategy:
-#      matrix:
-#        build: [Release]
-#        arch: [Win32, x64]
-#        include:
-#          - arch: Win32
-#            s2arc: x86
-#          - arch: x64
-#            s2arc: x64
-#
-#    steps:
-#      - name: Clone
-#        uses: actions/checkout@v1
-#
-#      - name: Add msbuild to PATH
-#        uses: microsoft/setup-msbuild@v1
-#
-#      - name: Configure
-#        run: >
-#          cmake -S . -B ./build -A ${{ matrix.arch }}
-#          -DCMAKE_BUILD_TYPE=${{ matrix.build }}
-#
-#      - name: Build
-#        run: |
-#          cd ./build
-#          msbuild ALL_BUILD.vcxproj -t:build -p:configuration=${{ matrix.build }} -p:platform=${{ matrix.arch }}
-#
-#      - name: Upload binaries
-#        uses: actions/upload-artifact@v1
-#        with:
-#          name: llama-bin-${{ matrix.arch }}
-#          path: build/bin/${{ matrix.build }}
-#
-#  windows-blas:
-#    runs-on: windows-latest
-#
-#    strategy:
-#      matrix:
-#        build: [Release]
-#        arch: [Win32, x64]
-#        blas: [ON]
-#        include:
-#          - arch: Win32
-#            obzip: https://github.com/xianyi/OpenBLAS/releases/download/v0.3.21/OpenBLAS-0.3.21-x86.zip
-#            s2arc: x86
-#          - arch: x64
-#            obzip: https://github.com/xianyi/OpenBLAS/releases/download/v0.3.21/OpenBLAS-0.3.21-x64.zip
-#            s2arc: x64
-#
-#    steps:
-#      - name: Clone
-#        uses: actions/checkout@v1
-#
-#      - name: Add msbuild to PATH
-#        uses: microsoft/setup-msbuild@v1
-#
-#      - name: Fetch OpenBLAS
-#        if: matrix.blas == 'ON'
-#        run: |
-#          C:/msys64/usr/bin/wget.exe -qO blas.zip ${{ matrix.obzip }}
-#          7z x blas.zip -oblas -y
-#          copy blas/include/cblas.h .
-#          copy blas/include/openblas_config.h .
-#          echo "blasdir=$env:GITHUB_WORKSPACE/blas" >> $env:GITHUB_ENV
-#
-#      - name: Configure
-#        run: >
-#          cmake -S . -B ./build -A ${{ matrix.arch }}
-#          -DCMAKE_BUILD_TYPE=${{ matrix.build }}
-#          -DLLAMA_SUPPORT_OPENBLAS=${{ matrix.blas }}
-#          -DCMAKE_LIBRARY_PATH="$env:blasdir/lib"
-#
-#      - name: Build
-#        run: |
-#          cd ./build
-#          msbuild ALL_BUILD.vcxproj -t:build -p:configuration=${{ matrix.build }} -p:platform=${{ matrix.arch }}
-#
-#      - name: Copy libopenblas.dll
-#        if: matrix.blas == 'ON'
-#        run: copy "$env:blasdir/bin/libopenblas.dll" build/bin/${{ matrix.build }}
-#
-#      - name: Upload binaries
-#        if: matrix.blas == 'ON'
-#        uses: actions/upload-artifact@v1
-#        with:
-#          name: llama-blas-bin-${{ matrix.arch }}
-#          path: build/bin/${{ matrix.build }}
-#
-#  emscripten:
-#    runs-on: ubuntu-latest
-#
-#    strategy:
-#      matrix:
-#        build: [Release]
-#
-#    steps:
-#      - name: Clone
-#        uses: actions/checkout@v1
-#
-#      - name: Dependencies
-#        run: |
-#          wget -q https://github.com/emscripten-core/emsdk/archive/master.tar.gz
-#          tar -xvf master.tar.gz
-#          emsdk-master/emsdk update
-#          emsdk-master/emsdk install latest
-#          emsdk-master/emsdk activate latest
-#
-#      - name: Configure
-#        run: echo "tmp"
-#
-#      - name: Build
-#        run: |
-#          pushd emsdk-master
-#          source ./emsdk_env.sh
-#          popd
-#          emcmake cmake . -DCMAKE_BUILD_TYPE=${{ matrix.build }}
-#          make

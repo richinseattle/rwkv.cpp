@@ -108,37 +108,6 @@ bool set_block_parameter(std::unordered_map<std::string, struct ggml_tensor *> *
     return set_parameter(parameters, full_key, dest);
 }
 
-size_t get_memory_required_mb(int32_t n_vocab, int32_t n_layer, int32_t n_embed, int32_t data_type) {
-    if (n_vocab == 50277) {
-        // Non-exact values are extrapolated (slightly bigger than needed).
-        // TODO Measure values exactly
-        static const size_t memory_required_mb[6][4] = {
-            /*            FP32   FP16  Q4_0   Q4_1
-               169M  */ {  650,   327,  105,   165}, // All measured exactly
-            /* 430M  */ { 1650,   830,  263,   415}, // FP32, FP16 are exact
-            /* 1.5B  */ { 5795,  2907,  923,  1454}, // FP32, FP16 are exact
-            /*   3B  */ {11610,  5720, 1816,  2860}, // FP16 is exact
-            /*   7B  */ {27090, 13634, 4328,  6817},
-            /*  14B  */ {54180, 27267, 8656, 13634}
-        };
-
-        /* 169M */ if (n_layer == 12 && n_embed ==  768) return memory_required_mb[0][data_type];
-        /* 430M */ if (n_layer == 24 && n_embed == 1024) return memory_required_mb[1][data_type];
-        /* 1.5B */ if (n_layer == 24 && n_embed == 2048) return memory_required_mb[2][data_type];
-        /*   3B */ if (n_layer == 32 && n_embed == 2560) return memory_required_mb[3][data_type];
-        /*   7B */ if (n_layer == 32 && n_embed == 4096) return memory_required_mb[4][data_type];
-        /*  14B */ if (n_layer == 40 && n_embed == 5120) return memory_required_mb[5][data_type];
-    }
-
-    fprintf(
-        stderr,
-        "Unknown RWKV model configuration: n_vocab = %d, n_layer = %d, n_embed = %d, data_type = %d; allocating 4 GB of memory\n",
-        n_vocab, n_layer, n_embed, data_type
-    );
-
-    return size_t(4) * 1024;
-}
-
 // --- Operators ---
 
 struct ggml_tensor * rwkv_layer_norm(ggml_context * ctx, struct ggml_tensor * x, struct ggml_tensor * weight, struct ggml_tensor * bias) {
@@ -163,7 +132,7 @@ struct rwkv_context {
     bool freed;
 };
 
-struct rwkv_context * rwkv_init_from_file(const char * file_path, int n_threads) {
+struct rwkv_context * rwkv_init_from_file(const char * file_path, uint32_t n_threads) {
     FILE * file = fopen(file_path, "rb");
     RWKV_ASSERT_NULL(file != NULL, "Failed to open file %s", file_path);
 
@@ -196,9 +165,30 @@ struct rwkv_context * rwkv_init_from_file(const char * file_path, int n_threads)
         model->data_type
     );
 
+    // Parameter tensors would take at least this amount in memory.
+    size_t file_size;
+
+    {
+        auto fin = std::ifstream(file_path, std::ios::binary);
+        RWKV_ASSERT_NULL(fin, "Failed to open file %s", file_path);
+        fin.seekg(0, fin.end);
+        file_size = fin.tellg();
+        fin.close();
+    }
+
+    size_t memory_required = file_size +
+        // Intermediary vectors for calculation; there are around 100 calls to ggml
+        size_t(100) * model->n_embed * sizeof(float) +
+        // State, in and out
+        size_t(2) * 5 * model->n_layer * model->n_embed * sizeof(float) +
+        // Logits
+        size_t(model->n_vocab) * sizeof(float) +
+        // +32 MB just for any overhead
+        size_t(32) * 1024 * 1024;
+
     // Initialize ggml
     struct ggml_init_params params;
-    params.mem_size = get_memory_required_mb(model->n_vocab, model->n_layer, model->n_embed, model->data_type) * 1024 * 1024;
+    params.mem_size = memory_required;
     params.mem_buffer = NULL;
     struct ggml_context * ctx = ggml_init(params);
 
@@ -206,12 +196,13 @@ struct rwkv_context * rwkv_init_from_file(const char * file_path, int n_threads)
 
     while (true) {
         int32_t dim_count;
-        fread(&dim_count, 4, 1, file);
+        size_t elements_read = fread(&dim_count, 4, 1, file);
 
         if (feof(file)) {
             break;
         }
 
+        RWKV_ASSERT_NULL(elements_read == 1, "Failed to read dimension count");
         RWKV_ASSERT_NULL(dim_count == 1 || dim_count == 2, "Unsupported dimension count %d", dim_count);
 
         int32_t key_length;
@@ -243,23 +234,20 @@ struct rwkv_context * rwkv_init_from_file(const char * file_path, int n_threads)
 
         int32_t x = -1;
         int32_t y = -1;
-        int32_t element_count;
 
         if (dim_count == 1) {
             read_int32(file, &x);
-            element_count = x;
             tensor = ggml_new_tensor_1d(ctx, ggml_data_type, x);
         } else if (dim_count == 2) {
             read_int32(file, &x);
             read_int32(file, &y);
-            element_count = x * y;
             tensor = ggml_new_tensor_2d(ctx, ggml_data_type, x, y);
         } else {
             abort();
         }
 
         std::string key(key_length, 0);
-        RWKV_ASSERT_NULL(fread(&key[0], 1, key_length, file) == key_length, "Failed to read parameter key");
+        RWKV_ASSERT_NULL(fread(&key[0], 1, key_length, file) == uint32_t(key_length), "Failed to read parameter key");
 
         RWKV_ASSERT_NULL(fread(tensor->data, 1, ggml_nbytes(tensor), file) == ggml_nbytes(tensor), "Failed to read parameter data");
 
@@ -314,7 +302,6 @@ struct rwkv_context * rwkv_init_from_file(const char * file_path, int n_threads)
     RWKV_ASSERT_NULL(emb->ne[0] == model->n_embed, "Unexpected dimension of embedding matrix %d", emb->ne[0]);
     RWKV_ASSERT_NULL(emb->ne[1] == model->n_vocab, "Unexpected dimension of embedding matrix %d", emb->ne[1]);
 
-    int32_t n_vocab = model->n_vocab;
     int32_t n_embed = model->n_embed;
     int32_t n_layer = model->n_layer;
 
@@ -505,15 +492,15 @@ struct rwkv_context * rwkv_init_from_file(const char * file_path, int n_threads)
     return rwkv_ctx;
 }
 
-size_t rwkv_get_state_buffer_element_count(struct rwkv_context * ctx) {
+uint32_t rwkv_get_state_buffer_element_count(struct rwkv_context * ctx) {
     return ctx->model->n_layer * 5 * ctx->model->n_embed;
 }
 
-size_t rwkv_get_logits_buffer_element_count(struct rwkv_context * ctx) {
+uint32_t rwkv_get_logits_buffer_element_count(struct rwkv_context * ctx) {
     return ctx->model->n_vocab;
 }
 
-bool rwkv_eval(struct rwkv_context * ctx, long int token, float * state_in, float * state_out, float * logits_out) {
+bool rwkv_eval(struct rwkv_context * ctx, int32_t token, float * state_in, float * state_out, float * logits_out) {
     RWKV_ASSERT_FALSE(state_out != NULL, "state_out is NULL");
     RWKV_ASSERT_FALSE(logits_out != NULL, "logits_out is NULL");
 
@@ -542,7 +529,7 @@ bool rwkv_eval(struct rwkv_context * ctx, long int token, float * state_in, floa
 
     ggml_graph_compute(ctx->ctx, ctx->graph);
 
-    for (size_t i = 0; i < n_layer * 5; i++) {
+    for (size_t i = 0; i < size_t(n_layer * 5); i++) {
         struct ggml_tensor * part = ctx->state_parts[i];
 
         memcpy(state_out + i * n_embed, part->data, part->ne[0] * FP32_SIZE);
@@ -564,7 +551,7 @@ void rwkv_free(struct rwkv_context * ctx) {
     delete ctx;
 }
 
-bool rwkv_quantize_model_file(const char * model_file_path_in, const char * model_file_path_out, int q_type) {
+bool rwkv_quantize_model_file(const char * model_file_path_in, const char * model_file_path_out, uint32_t q_type) {
     RWKV_ASSERT_FALSE(q_type == 2 || q_type == 3, "Unsupported quantization type %d", q_type);
 
     ggml_type type;
